@@ -6,7 +6,7 @@ See https://docs.convex.dev/functions for more.
 A query function that takes two arguments looks like:
 
 ```ts
-// functions.js
+// functions.ts
 import { query } from "./_generated/server";
 import { v } from "convex/values";
 
@@ -45,7 +45,7 @@ const data = useQuery(api.functions.myQueryFunction, {
 A mutation function looks like:
 
 ```ts
-// functions.js
+// functions.ts
 import { mutation } from "./_generated/server";
 import { v } from "convex/values";
 
@@ -85,6 +85,12 @@ function handleButtonPress() {
 }
 ```
 
-Use the Convex CLI to push your functions to a deployment. See everything
-the Convex CLI can do by running `npx convex -h` in your project root
-directory. To learn more, launch the docs with `npx convex docs`.
+Deploying your Convex functions:
+
+```bash
+bun dev
+
+or
+
+npx convex dev
+```

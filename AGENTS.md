@@ -1,0 +1,21 @@
+AGENTS — Quick Guide for this repo
+- Build/install: Bun + Turbo workspaces.
+- Install deps: `bun install` at repo root.
+- Dev: `bun run dev` (Turbo), or `bun run dev:web`, `bun run dev:server`.
+- Build: `bun run build`; Type-check: `bun run check-types`.
+- Lint/format: `bun run check` (Biome check --write).
+- Optional: `bunx ultracite {check,fix}` to apply Cursor rules.
+- Tests: currently no test script or files present.
+- Single-test (when added): Bun test → `bun test path -t "name"`.
+- Single-test (Vitest alt): `bunx vitest path -t "name"`.
+- Style source of truth: `.cursor/rules/ultracite.mdc` and `.github/copilot-instructions.md`.
+- Imports: ESM only; use `import type`/`export type`; avoid namespace imports.
+- Types: no `any`/`!`; avoid enums/const enums; prefer `as const`; consistent `T[]` vs `Array<T>`.
+- Naming: PascalCase components/types; camelCase vars/functions; UPPER_SNAKE_CASE constants; kebab-case files.
+- React/Next: hooks at top-level; keys on lists (no index); no `<img>`; use Next/Image; no `next/head` in app router.
+- A11y: add `type="button"` on buttons; valid roles/aria; focusable interactives.
+- Error handling: throw `new Error(...)`; no `console`; don’t swallow errors.
+- Code quality: prefer arrow funcs; use `for..of`; avoid nested ternaries, var, bitwise; use `node:` protocol imports.
+- Data safety: never hardcode secrets; follow `.env.example`.
+- Monorepo layout: web app in `apps/web`; Convex in `packages/backend`.
+- Commit hygiene: run `bun run check` and type-check before PRs.

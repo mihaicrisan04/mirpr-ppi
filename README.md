@@ -21,7 +21,7 @@
 
 **Mac OS / Linux**:
 ```bash
-brew install bun
+brew install oven-sh/bun/bun
 
 or
 
@@ -30,6 +30,10 @@ curl -fsSL https://bun.com/install | bash
 
 **Windows**:
 ```bash
+scoop install bun
+
+or
+
 powershell -c "irm bun.sh/install.ps1|iex"
 ```
 

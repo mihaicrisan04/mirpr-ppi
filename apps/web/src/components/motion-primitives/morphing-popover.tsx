@@ -14,7 +14,10 @@ import {
   MotionConfig,
   motion
 } from 'motion/react';
-import type { Transition, Variants } from 'motion/react';
+import type {
+  Transition,
+  Variants
+} from 'motion/react';
 import useClickOutside from '@/hooks/useClickOutside';
 import { cn } from '@/lib/utils';
 

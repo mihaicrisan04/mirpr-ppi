@@ -132,4 +132,10 @@ body {
   body {
     @apply bg-background text-foreground;
   }
+  .slider-input {
+    background: linear-gradient(to right, #2563eb 0%, #2563eb var(--slider-progress, 0%), #e5e7eb var(--slider-progress, 0%), #e5e7eb 100%);
+  }
+  .dark .slider-input {
+    background: linear-gradient(to right, #2563eb 0%, #2563eb var(--slider-progress, 0%), #4b5563 var(--slider-progress, 0%), #4b5563 100%);
+  }
 }

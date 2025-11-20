@@ -14,13 +14,18 @@ What this package is
 
 ## Development
 - Always run commands for this web project from the web root.
-- Install dependencies from the repo root:
+- Install all the dependencies from the repo root:
   - `bun install`
-- Use `bun add` to add packages to this project:
-  - Regular dependecies: `bun add <package-name>`
-  - Dev dependencies: `bun add <package-name> -d`
-  - For shadcn/ui and other ui libraries compatible with their registry use: `bunx shadcn@latest add button` or `npx shadcn@latest add "https://motion-primitives.com/c/animated-group.json"`
-- Build the project:
+- Use `bun add` to add packages to this project specifically(deps that only this project needs):
+  - 1. `cd apps/web`
+  - 2. Regular dependecies: `bun add <package-name>`
+  - 2. Dev dependencies: `bun add <package-name> -d`
+- !!!For shadcn/ui and other ui libraries compatible with their registry use: `bunx shadcn@latest add button` or `npx shadcn@latest add "https://motion-primitives.com/c/animated-group.json"` fomr the src directory.
+  example: 
+  - `cd apps/web/src`
+  - `bunx shadcn@latest add button`
+- Build only the web proejct:
+  - `cd apps/web`
   - `bun build`
 
 ## Environment Variables

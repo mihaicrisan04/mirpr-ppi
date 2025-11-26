@@ -2,31 +2,60 @@
 
 import { useMutation } from "convex/react";
 import { api } from "@mirpr-ppi/backend/convex/_generated/api";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ThreadView } from "./thread-view";
-import { Button } from "@/components/ui/button";
+import { Loader2Icon } from "lucide-react";
 
 export default function ChatPage() {
   const createThread = useMutation(api.agent.createAgentThread);
   const [threadId, setThreadId] = useState<string | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
+  // Auto-create thread on page load
+  useEffect(() => {
+    const initThread = async () => {
+      try {
+        const id = await createThread();
+        setThreadId(id);
+      } catch (error) {
+        // Error creating thread - will show error state
+      } finally {
+        setIsLoading(false);
+      }
+    };
 
-  return  (
-    <div className="min-h-screen flex items-center justify-center p-6">
-      <div className="w-full max-w-3xl shadow-md rounded-lg p-6">
-        {threadId ? (
-          <ThreadView threadId={threadId} />
-        ) : (
-          <div className="flex flex-col items-center gap-4">
-            <h2 className="text-xl font-semibold text-gray-800">Start a new thread</h2>
-            <Button
-              className="px-5 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-300"
-              onClick={() => createThread().then((id) => setThreadId(id))}
-            >
-              Create Thread
-            </Button>
-          </div>
-        )}
+    initThread();
+  }, [createThread]);
+
+  if (isLoading) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-4">
+          <Loader2Icon className="size-8 animate-spin text-muted-foreground" />
+          <p className="text-muted-foreground text-sm">
+            Starting conversation...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!threadId) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="flex flex-col items-center gap-4 text-center">
+          <p className="text-destructive">
+            Failed to start conversation. Please refresh the page.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex h-full flex-col p-4">
+      <div className="mx-auto w-full max-w-4xl flex-1">
+        <ThreadView threadId={threadId} />
       </div>
     </div>
   );

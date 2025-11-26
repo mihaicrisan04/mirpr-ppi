@@ -16,8 +16,11 @@
     "@ai-sdk/openai": "^2.0.53",
     "@convex-dev/agent": "catalog:",
     "@convex-dev/better-auth": "catalog:",
+    "@convex-dev/rag": "catalog:",
+    "@convex-dev/resend": "catalog:",
     "ai": "catalog:",
     "better-auth": "catalog:",
-    "convex": "catalog:"
+    "convex": "catalog:",
+    "zod": "^4.1.13"
   }
 }

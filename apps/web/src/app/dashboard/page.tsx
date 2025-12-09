@@ -21,24 +21,37 @@ import {
   Trash2Icon,
   UploadIcon,
 } from "lucide-react";
+import { MultiFileUpload } from "@/components/multi-file-upload";
+import { MultiPdfUpload } from "@/components/multi-pdf-upload";
+import { CombinedFileUpload } from "@/components/multi-file-combined-upload";
+import { PdfsList } from "@/components/pdfs-list";
 
 export default function DashboardPage() {
   return (
-    <div className="container mx-auto max-w-4xl space-y-8 p-6">
+    <div className="container mx-auto max-w-4xl space-y-8 p-6" suppressHydrationWarning>
       <div className="space-y-2">
         <h1 className="font-bold text-3xl tracking-tight">Knowledge Base</h1>
         <p className="text-muted-foreground">
           Manage the AI assistant's knowledge by adding text content or
-          uploading files.
+          uploading .txt and .pdf files.
         </p>
       </div>
 
       <div className="grid gap-6 md:grid-cols-2">
         <AddTextContent />
-        <UploadFile />
+        <CombinedUploadSection />
       </div>
 
-      <DocumentsList />
+      <div className="grid gap-6 md:grid-cols-2">
+        <DocumentsList />
+        <FilesList />
+      </div>
+
+      <div className="grid gap-6">
+        <div className="md:col-span-2">
+          <PdfsList />
+        </div>
+      </div>
     </div>
   );
 }
@@ -123,96 +136,294 @@ function AddTextContent() {
   );
 }
 
-function UploadFile() {
-  const addDocument = useAction(api.rag.addDocument);
+function CombinedUploadSection() {
+  const uploadFiles = useAction(api.files.uploadFiles);
+  const uploadPdfs = useAction(api.pdfs.uploadPdfs);
+  const generateFileUploadUrl = useMutation(api.files.generateUploadUrl);
+  const generatePdfUploadUrl = useMutation(api.pdfs.generateUploadUrl);
   const [isUploading, setIsUploading] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
-  const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file && file.type === "text/plain") {
-      setSelectedFile(file);
+  const handleFilesReady = async (
+    txtFiles: Array<{ fileName: string; fileSize: number; content: string; file: File }>,
+    pdfFiles: Array<{
+      fileName: string;
+      fileSize: number;
+      extractedText: string;
+      rawText: string;
+      pageCount?: number;
+      mimeType: string;
+      file: File;
+    }>
+  ) => {
+    if (txtFiles.length === 0 && pdfFiles.length === 0) {
+      console.warn("No files to upload");
+      return;
     }
-  };
-
-  const handleUpload = useCallback(async () => {
-    if (!selectedFile) return;
-
+    
     setIsUploading(true);
     try {
-      const content = await selectedFile.text();
-      await addDocument({
-        title: selectedFile.name.replace(".txt", ""),
-        content,
-      });
-      setSelectedFile(null);
-      // Reset the file input
-      const fileInput = document.getElementById(
-        "file-upload"
-      ) as HTMLInputElement;
-      if (fileInput) {
-        fileInput.value = "";
+      // Upload TXT files with file storage
+      if (txtFiles.length > 0) {
+        try {
+          const txtFilesWithStorage = await Promise.all(
+            txtFiles.map(async (txtFile) => {
+              try {
+                // Generate upload URL
+                console.log(`[TXT] Generating upload URL for ${txtFile.fileName}...`);
+                let uploadUrl;
+                try {
+                  uploadUrl = await generateFileUploadUrl();
+                  console.log(`[TXT] ✓ Got upload URL: ${uploadUrl?.substring(0, 50)}...`);
+                } catch (mutationError) {
+                  console.error(`[TXT] ✗ MUTATION FAILED:`, mutationError);
+                  throw new Error(`Failed to generate upload URL: ${mutationError}`);
+                }
+                
+                if (!uploadUrl) {
+                  throw new Error("Upload URL is empty/undefined");
+                }
+                
+                // Upload the file
+                console.log(`[TXT] Uploading file ${txtFile.fileName} (${txtFile.fileSize} bytes)...`);
+                const response = await fetch(uploadUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "text/plain" },
+                  body: txtFile.file,
+                });
+                
+                if (!response.ok) {
+                  const text = await response.text();
+                  throw new Error(`Upload failed with status ${response.status}: ${text}`);
+                }
+                
+                const responseData = await response.json();
+                console.log(`[TXT] ✓ Upload response:`, responseData);
+                
+                const { storageId } = responseData;
+                if (!storageId) {
+                  throw new Error("No storageId in response");
+                }
+                
+                return {
+                  fileName: txtFile.fileName,
+                  fileSize: txtFile.fileSize,
+                  content: txtFile.content,
+                  storageId,
+                };
+              } catch (error) {
+                throw error;
+              }
+            })
+          );
+          console.log("[TXT] Calling uploadFiles action...");
+          await uploadFiles({ files: txtFilesWithStorage });
+          console.log("[TXT] ✓ TXT files processed successfully");
+        } catch (error) {
+          console.error("[TXT] Error in TXT upload block:", error);
+          throw error;
+        }
       }
+
+      // Upload PDF files with file storage
+      if (pdfFiles.length > 0) {
+        try {
+          const pdfFilesWithStorage = await Promise.all(
+            pdfFiles.map(async (pdfFile) => {
+              try {
+                // Generate upload URL
+                const uploadUrl = await generatePdfUploadUrl();
+                
+                if (!uploadUrl) {
+                  throw new Error("Upload URL is empty/undefined");
+                }
+                
+                // Upload the file
+                const response = await fetch(uploadUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": pdfFile.mimeType },
+                  body: pdfFile.file,
+                });
+                
+                if (!response.ok) {
+                  const text = await response.text();
+                  throw new Error(`Upload failed with status ${response.status}: ${text}`);
+                }
+                
+                const responseData = await response.json();
+                const { storageId } = responseData;
+                if (!storageId) {
+                  throw new Error("No storageId in response");
+                }
+                
+                return {
+                  fileName: pdfFile.fileName,
+                  fileSize: pdfFile.fileSize,
+                  extractedText: pdfFile.extractedText,
+                  rawText: pdfFile.rawText,
+                  pageCount: pdfFile.pageCount,
+                  mimeType: pdfFile.mimeType,
+                  storageId,
+                };
+              } catch (error) {
+                throw error;
+              }
+            })
+          );
+          await uploadPdfs({ pdfs: pdfFilesWithStorage });
+        } catch (error) {
+          throw error;
+        }
+      }
+    } catch (error) {
+      throw error;
     } finally {
       setIsUploading(false);
     }
-  }, [selectedFile, addDocument]);
+  };
 
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-2">
           <UploadIcon className="size-5" />
-          Upload Text File
+          Upload Files
         </CardTitle>
         <CardDescription>
-          Upload a .txt file to add to the knowledge base
+          Upload multiple .txt and .pdf files at once to the knowledge base
         </CardDescription>
       </CardHeader>
       <CardContent>
-        <div className="space-y-4">
-          <div className="space-y-2">
-            <Label htmlFor="file-upload">Select File</Label>
-            <Input
-              id="file-upload"
-              type="file"
-              accept=".txt,text/plain"
-              onChange={handleFileChange}
-              disabled={isUploading}
-            />
+        <CombinedFileUpload
+          maxFiles={20}
+          onFilesReady={handleFilesReady}
+          isUploading={isUploading}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function UploadMultipleFiles() {
+  const uploadFiles = useAction(api.files.uploadFiles);
+  const [isUploading, setIsUploading] = useState(false);
+
+  const handleFilesReady = async (
+    files: Array<{ fileName: string; fileSize: number; content: string }>
+  ) => {
+    setIsUploading(true);
+    try {
+      await uploadFiles({
+        files,
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <UploadIcon className="size-5" />
+          Upload Text Files (.txt)
+        </CardTitle>
+        <CardDescription>
+          Upload multiple .txt files at once to the knowledge base
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <MultiFileUpload
+          accept=".txt,text/plain"
+          maxFiles={10}
+          onFilesReady={handleFilesReady}
+          isUploading={isUploading}
+        />
+      </CardContent>
+    </Card>
+  );
+}
+
+function FilesList() {
+  const files = useQuery(api.files.listFiles, {});
+  const deleteFile = useMutation(api.files.deleteFile);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDelete = async (fileId: string) => {
+    setDeletingId(fileId);
+    try {
+      // @ts-expect-error - fileId type mismatch
+      await deleteFile({ fileId });
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  if (files === undefined) {
+    return (
+      <Card>
+        <CardHeader>
+          <CardTitle>Uploaded Files</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <div className="flex items-center justify-center py-8">
+            <Loader2Icon className="size-6 animate-spin text-muted-foreground" />
           </div>
+        </CardContent>
+      </Card>
+    );
+  }
 
-          {selectedFile && (
-            <div className="flex items-center gap-2 rounded-md border bg-muted/50 p-3">
-              <FileTextIcon className="size-5 text-muted-foreground" />
-              <div className="flex-1 truncate">
-                <p className="font-medium text-sm">{selectedFile.name}</p>
-                <p className="text-muted-foreground text-xs">
-                  {(selectedFile.size / 1024).toFixed(1)} KB
-                </p>
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <FileTextIcon className="size-5" />
+          Uploaded Files ({files.length})
+        </CardTitle>
+        <CardDescription>All uploaded text files</CardDescription>
+      </CardHeader>
+      <CardContent>
+        {files.length === 0 ? (
+          <div className="py-8 text-center text-muted-foreground">
+            <FileTextIcon className="mx-auto mb-2 size-12 opacity-50" />
+            <p>No files uploaded yet</p>
+            <p className="text-sm">Upload files to get started</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {files.map((file) => (
+              <div
+                key={file._id}
+                className="flex items-start gap-3 rounded-lg border p-4 transition-colors hover:bg-muted/50"
+              >
+                <FileTextIcon className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+                <div className="min-w-0 flex-1">
+                  <h4 className="font-medium">{file.fileName}</h4>
+                  <div className="mt-1 flex items-center gap-2 text-muted-foreground text-xs">
+                    <span>{(file.fileSize / 1024).toFixed(1)} KB</span>
+                    <span>•</span>
+                    <span>
+                      {new Date(file.createdAt).toLocaleDateString()}
+                    </span>
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  onClick={() => handleDelete(file._id)}
+                  disabled={deletingId === file._id}
+                  className="shrink-0 text-muted-foreground hover:text-destructive"
+                >
+                  {deletingId === file._id ? (
+                    <Loader2Icon className="size-4 animate-spin" />
+                  ) : (
+                    <Trash2Icon className="size-4" />
+                  )}
+                </Button>
               </div>
-            </div>
-          )}
-
-          <Button
-            type="button"
-            onClick={handleUpload}
-            disabled={isUploading || !selectedFile}
-            className="w-full"
-          >
-            {isUploading ? (
-              <>
-                <Loader2Icon className="mr-2 size-4 animate-spin" />
-                Uploading...
-              </>
-            ) : (
-              <>
-                <UploadIcon className="mr-2 size-4" />
-                Upload File
-              </>
-            )}
-          </Button>
-        </div>
+            ))}
+          </div>
+        )}
       </CardContent>
     </Card>
   );
@@ -308,6 +519,52 @@ function DocumentsList() {
             ))}
           </div>
         )}
+      </CardContent>
+    </Card>
+  );
+}
+
+function UploadMultiplePdfs() {
+  const uploadPdfs = useAction(api.pdfs.uploadPdfs);
+  const [isUploading, setIsUploading] = useState(false);
+
+  const handlePdfsReady = async (
+    pdfs: Array<{
+      fileName: string;
+      fileSize: number;
+      extractedText: string;
+      rawText: string;
+      pageCount?: number;
+      mimeType: string;
+    }>
+  ) => {
+    setIsUploading(true);
+    try {
+      await uploadPdfs({
+        pdfs,
+      });
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <UploadIcon className="size-5" />
+          Upload PDF Files (.pdf)
+        </CardTitle>
+        <CardDescription>
+          Upload multiple .pdf files at once to the knowledge base
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <MultiPdfUpload
+          maxFiles={10}
+          onPdfsReady={handlePdfsReady}
+          isUploading={isUploading}
+        />
       </CardContent>
     </Card>
   );

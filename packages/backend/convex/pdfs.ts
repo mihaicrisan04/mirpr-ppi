@@ -1,4 +1,5 @@
-import { v } from "convex/values";
+import { v, type Value } from "convex/values";
+import type { Id } from "./_generated/dataModel";
 import { mutation, query, action, internalMutation } from "./_generated/server";
 import { rag, saveDocumentMetadata } from "./rag";
 import { internal } from "./_generated/api";
@@ -15,6 +16,15 @@ function cleanPdfText(text: string): string {
     .trim();
 }
 
+// Generate upload URL for PDF file storage
+export const generateUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const url = await ctx.storage.generateUploadUrl();
+    return url;
+  },
+});
+
 // Internal mutation to save PDF metadata and content
 export const savePdfAndContent = internalMutation({
   args: {
@@ -25,9 +35,10 @@ export const savePdfAndContent = internalMutation({
     pageCount: v.optional(v.number()),
     userId: v.optional(v.string()),
     mimeType: v.string(),
+    storageId: v.optional(v.id("_storage")), // Convex storage ID
   },
   handler: async (ctx, args) => {
-    // Insert PDF metadata
+    // Insert PDF metadata with storage ID
     const pdfId = await ctx.db.insert("pdfs", {
       fileName: args.fileName,
       fileSize: args.fileSize,
@@ -35,6 +46,7 @@ export const savePdfAndContent = internalMutation({
       createdAt: Date.now(),
       status: "processing",
       mimeType: args.mimeType,
+      storageId: args.storageId,
     });
 
     // Insert PDF content
@@ -72,6 +84,7 @@ export const uploadPdfs = action({
         rawText: v.string(),
         pageCount: v.optional(v.number()),
         mimeType: v.string(),
+        storageId: v.optional(v.id("_storage")), // Storage ID from client upload
       })
     ),
     userId: v.optional(v.string()),
@@ -84,6 +97,7 @@ export const uploadPdfs = action({
       success: boolean;
       fileName: string;
       pdfId?: string;
+      storageId?: string;
       status?: string;
       error?: string;
     }>
@@ -92,17 +106,21 @@ export const uploadPdfs = action({
       success: boolean;
       fileName: string;
       pdfId?: string;
+      storageId?: string;
       status?: string;
       error?: string;
     }> = [];
 
     for (const pdf of args.pdfs) {
+      let pdfId: string | undefined;
+      const storageId = pdf.storageId;
+      
       try {
         // Clean extracted text
         const cleanedText = cleanPdfText(pdf.extractedText);
 
         // Save PDF metadata and content to database
-        const { pdfId, contentLength } = await ctx.runMutation(
+        const saveResult = await ctx.runMutation(
           internal.pdfs.savePdfAndContent,
           {
             fileName: pdf.fileName,
@@ -112,8 +130,11 @@ export const uploadPdfs = action({
             pageCount: pdf.pageCount,
             userId: args.userId,
             mimeType: pdf.mimeType,
+            storageId,
           }
         );
+        pdfId = saveResult.pdfId;
+        const contentLength = saveResult.contentLength;
 
         // Create content preview (first 300 chars)
         const contentPreview =
@@ -130,22 +151,26 @@ export const uploadPdfs = action({
         });
 
         // Ingest content into RAG with embeddings
+        const metadata: Record<string, Value> = {
+          title: pdf.fileName.replace(".pdf", ""),
+          userId: args.userId ?? "anonymous",
+          pdfId: pdfId ?? "",
+          fileSize: pdf.fileSize,
+          pageCount: pdf.pageCount ?? 0,
+          source: "pdf",
+        };
+        if (storageId) {
+          metadata.storageId = storageId;
+        }
         await rag.add(ctx, {
           namespace: RAG_NAMESPACE,
           text: cleanedText,
-          metadata: {
-            title: pdf.fileName.replace(".pdf", ""),
-            userId: args.userId ?? "anonymous",
-            pdfId,
-            fileSize: pdf.fileSize,
-            pageCount: pdf.pageCount ?? 0,
-            source: "pdf",
-          },
+          metadata,
         });
 
         // Update PDF status to embedded
         await ctx.runMutation(internal.pdfs.updatePdfStatus, {
-          pdfId,
+          pdfId: pdfId as any,
           status: "embedded",
         });
 
@@ -153,14 +178,31 @@ export const uploadPdfs = action({
           success: true,
           fileName: pdf.fileName,
           pdfId,
+          storageId,
           status: "embedded",
         });
       } catch (error) {
+        console.error(`Failed to process PDF ${pdf.fileName}:`, error);
+        const errorMsg = error instanceof Error ? error.message : "Unknown error";
+        
+        // Update status to failed if we managed to create the PDF record
+        if (pdfId) {
+          try {
+            await ctx.runMutation(internal.pdfs.updatePdfStatus, {
+              pdfId: pdfId as any,
+              status: "failed",
+            });
+          } catch (updateError) {
+            console.error(`Failed to update PDF status to failed:`, updateError);
+          }
+        }
+        
         results.push({
           success: false,
           fileName: pdf.fileName,
+          pdfId,
           status: "failed",
-          error: error instanceof Error ? error.message : "Unknown error",
+          error: errorMsg,
         });
       }
     }
@@ -242,5 +284,36 @@ export const getPdfsByStatus = query({
     }
 
     return results.filter((pdf) => pdf.status === args.status);
+  },
+});
+
+// Mutation to delete a PDF and its content
+export const deletePdf = mutation({
+  args: {
+    pdfId: v.id("pdfs"),
+  },
+  handler: async (ctx, args) => {
+    // Get PDF metadata to retrieve storageId
+    const pdf = await ctx.db.get(args.pdfId);
+    
+    if (pdf && pdf.storageId) {
+      // Delete file from Convex file storage
+      await ctx.storage.delete(pdf.storageId);
+    }
+    
+    // Delete PDF content
+    const contentRecords = await ctx.db
+      .query("pdfContent")
+      .withIndex("by_pdfId", (q) => q.eq("pdfId", args.pdfId))
+      .collect();
+
+    for (const record of contentRecords) {
+      await ctx.db.delete(record._id);
+    }
+
+    // Delete PDF metadata
+    await ctx.db.delete(args.pdfId);
+
+    return { success: true };
   },
 });

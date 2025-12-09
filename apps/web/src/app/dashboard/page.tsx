@@ -139,10 +139,12 @@ function AddTextContent() {
 function CombinedUploadSection() {
   const uploadFiles = useAction(api.files.uploadFiles);
   const uploadPdfs = useAction(api.pdfs.uploadPdfs);
+  const generateFileUploadUrl = useMutation(api.files.generateUploadUrl);
+  const generatePdfUploadUrl = useMutation(api.pdfs.generateUploadUrl);
   const [isUploading, setIsUploading] = useState(false);
 
   const handleFilesReady = async (
-    txtFiles: Array<{ fileName: string; fileSize: number; content: string }>,
+    txtFiles: Array<{ fileName: string; fileSize: number; content: string; file: File }>,
     pdfFiles: Array<{
       fileName: string;
       fileSize: number;
@@ -150,20 +152,130 @@ function CombinedUploadSection() {
       rawText: string;
       pageCount?: number;
       mimeType: string;
+      file: File;
     }>
   ) => {
+    if (txtFiles.length === 0 && pdfFiles.length === 0) {
+      console.warn("No files to upload");
+      return;
+    }
+    
     setIsUploading(true);
     try {
+      // Upload TXT files with file storage
       if (txtFiles.length > 0) {
-        await uploadFiles({
-          files: txtFiles,
-        });
+        try {
+          const txtFilesWithStorage = await Promise.all(
+            txtFiles.map(async (txtFile) => {
+              try {
+                // Generate upload URL
+                console.log(`[TXT] Generating upload URL for ${txtFile.fileName}...`);
+                let uploadUrl;
+                try {
+                  uploadUrl = await generateFileUploadUrl();
+                  console.log(`[TXT] ✓ Got upload URL: ${uploadUrl?.substring(0, 50)}...`);
+                } catch (mutationError) {
+                  console.error(`[TXT] ✗ MUTATION FAILED:`, mutationError);
+                  throw new Error(`Failed to generate upload URL: ${mutationError}`);
+                }
+                
+                if (!uploadUrl) {
+                  throw new Error("Upload URL is empty/undefined");
+                }
+                
+                // Upload the file
+                console.log(`[TXT] Uploading file ${txtFile.fileName} (${txtFile.fileSize} bytes)...`);
+                const response = await fetch(uploadUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": "text/plain" },
+                  body: txtFile.file,
+                });
+                
+                if (!response.ok) {
+                  const text = await response.text();
+                  throw new Error(`Upload failed with status ${response.status}: ${text}`);
+                }
+                
+                const responseData = await response.json();
+                console.log(`[TXT] ✓ Upload response:`, responseData);
+                
+                const { storageId } = responseData;
+                if (!storageId) {
+                  throw new Error("No storageId in response");
+                }
+                
+                return {
+                  fileName: txtFile.fileName,
+                  fileSize: txtFile.fileSize,
+                  content: txtFile.content,
+                  storageId,
+                };
+              } catch (error) {
+                throw error;
+              }
+            })
+          );
+          console.log("[TXT] Calling uploadFiles action...");
+          await uploadFiles({ files: txtFilesWithStorage });
+          console.log("[TXT] ✓ TXT files processed successfully");
+        } catch (error) {
+          console.error("[TXT] Error in TXT upload block:", error);
+          throw error;
+        }
       }
+
+      // Upload PDF files with file storage
       if (pdfFiles.length > 0) {
-        await uploadPdfs({
-          pdfs: pdfFiles,
-        });
+        try {
+          const pdfFilesWithStorage = await Promise.all(
+            pdfFiles.map(async (pdfFile) => {
+              try {
+                // Generate upload URL
+                const uploadUrl = await generatePdfUploadUrl();
+                
+                if (!uploadUrl) {
+                  throw new Error("Upload URL is empty/undefined");
+                }
+                
+                // Upload the file
+                const response = await fetch(uploadUrl, {
+                  method: "POST",
+                  headers: { "Content-Type": pdfFile.mimeType },
+                  body: pdfFile.file,
+                });
+                
+                if (!response.ok) {
+                  const text = await response.text();
+                  throw new Error(`Upload failed with status ${response.status}: ${text}`);
+                }
+                
+                const responseData = await response.json();
+                const { storageId } = responseData;
+                if (!storageId) {
+                  throw new Error("No storageId in response");
+                }
+                
+                return {
+                  fileName: pdfFile.fileName,
+                  fileSize: pdfFile.fileSize,
+                  extractedText: pdfFile.extractedText,
+                  rawText: pdfFile.rawText,
+                  pageCount: pdfFile.pageCount,
+                  mimeType: pdfFile.mimeType,
+                  storageId,
+                };
+              } catch (error) {
+                throw error;
+              }
+            })
+          );
+          await uploadPdfs({ pdfs: pdfFilesWithStorage });
+        } catch (error) {
+          throw error;
+        }
       }
+    } catch (error) {
+      throw error;
     } finally {
       setIsUploading(false);
     }

@@ -17,6 +17,38 @@ import {
 import { cn } from "@/lib/utils";
 import { Progress } from "@/components/ui/progress";
 
+// Module-level state for PDF.js - survives component remounts and hot reloads
+let pdfjsModule: typeof import("pdfjs-dist") | null = null;
+let pdfjsInitPromise: Promise<typeof import("pdfjs-dist")> | null = null;
+
+// Single initialization function
+const initPdfJs = (): Promise<typeof import("pdfjs-dist")> => {
+  // Return cached module if already initialized
+  if (pdfjsModule) {
+    return Promise.resolve(pdfjsModule);
+  }
+
+  // Return existing promise if initialization is in progress
+  if (pdfjsInitPromise) {
+    return pdfjsInitPromise;
+  }
+
+  if (typeof window === "undefined") {
+    return Promise.reject(new Error("PDF.js can only be used on client side"));
+  }
+
+  // Create and cache the initialization promise
+  pdfjsInitPromise = import("pdfjs-dist").then((pdfjsLib) => {
+    // Use CDN worker matching the installed version
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+    pdfjsModule = pdfjsLib;
+    console.log(`PDF.js v${pdfjsLib.version} initialized with CDN worker`);
+    return pdfjsLib;
+  });
+
+  return pdfjsInitPromise;
+};
+
 type FileType = "txt" | "pdf";
 
 interface UploadedFileItem {
@@ -33,7 +65,7 @@ interface UploadedFileItem {
 interface CombinedUploadProps {
   maxFiles?: number;
   onFilesReady: (
-    txtFiles: Array<{ fileName: string; fileSize: number; content: string }>,
+    txtFiles: Array<{ fileName: string; fileSize: number; content: string; file: File }>,
     pdfFiles: Array<{
       fileName: string;
       fileSize: number;
@@ -41,6 +73,7 @@ interface CombinedUploadProps {
       rawText: string;
       pageCount?: number;
       mimeType: string;
+      file: File;
     }>
   ) => Promise<void>;
   isUploading?: boolean;
@@ -106,8 +139,11 @@ export function CombinedFileUpload({
     setIsProcessing(true);
     console.log(`Starting to process ${filesToProcess.length} files`);
 
-    for (let i = 0; i < filesToProcess.length; i++) {
-      const fileItem = filesToProcess[i];
+    // Create a mutable copy for processing
+    const processingFiles = filesToProcess.map(f => ({ ...f }));
+
+    for (let i = 0; i < processingFiles.length; i++) {
+      const fileItem = processingFiles[i];
 
       if (fileItem.isLoaded || fileItem.isLoading || fileItem.error) {
         console.log(`Skipping ${fileItem.file.name} - already processed or has error`);
@@ -144,11 +180,12 @@ export function CombinedFileUpload({
         fileItem.isLoading = false;
       }
 
-      setSelectedFiles([...filesToProcess]);
+      // Update state with new array containing updated objects
+      setSelectedFiles(processingFiles.map(f => ({ ...f })));
     }
 
     setIsProcessing(false);
-    console.log(`Finished processing files`);
+    console.log(`Finished processing files. Ready count: ${processingFiles.filter(f => f.isLoaded).length}`);
   };
 
   const extractTextFromTxt = async (
@@ -164,25 +201,28 @@ export function CombinedFileUpload({
     try {
       console.log(`Starting PDF extraction for: ${file.name}`);
 
-      const { getDocument } = await import("pdfjs-dist");
-      console.log(`PDF.js library loaded`);
+      const pdfjsLib = await initPdfJs();
 
       const arrayBuffer = await file.arrayBuffer();
       console.log(`File loaded, size: ${arrayBuffer.byteLength} bytes`);
 
-      const pdf = await getDocument({ data: arrayBuffer }).promise;
+      const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       console.log(`PDF loaded, pages: ${pdf.numPages}`);
 
       let text = "";
 
       for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items
-          .map((item: any) => item.str || "")
-          .join(" ");
-        text += pageText + "\n";
-        console.log(`Extracted page ${i} of ${pdf.numPages}`);
+        try {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items
+            .map((item: any) => item.str || "")
+            .join(" ");
+          text += pageText + "\n";
+          console.log(`Extracted page ${i} of ${pdf.numPages}`);
+        } catch (pageError) {
+          console.warn(`Failed to extract page ${i}:`, pageError);
+        }
       }
 
       const finalText = text.trim();
@@ -206,6 +246,7 @@ export function CombinedFileUpload({
         fileName: f.file.name,
         fileSize: f.file.size,
         content: f.extractedText || "",
+        file: f.file,
       }));
 
     const readyPdfs = selectedFiles
@@ -217,9 +258,8 @@ export function CombinedFileUpload({
         rawText: f.extractedText || "",
         pageCount: f.pageCount,
         mimeType: f.file.type || "application/pdf",
+        file: f.file,
       }));
-
-    console.log(`Ready to upload ${readyTxts.length} TXTs and ${readyPdfs.length} PDFs`);
 
     if (readyTxts.length === 0 && readyPdfs.length === 0) {
       console.warn("No files ready for upload");

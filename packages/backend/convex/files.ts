@@ -5,6 +5,15 @@ import { internal } from "./_generated/api";
 
 const RAG_NAMESPACE = "knowledge-base";
 
+// Generate upload URL for file storage
+export const generateUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const url = await ctx.storage.generateUploadUrl();
+    return url;
+  },
+});
+
 // Internal mutation to save file metadata and content
 export const saveFileAndContent = internalMutation({
   args: {
@@ -12,14 +21,16 @@ export const saveFileAndContent = internalMutation({
     fileSize: v.number(),
     content: v.string(),
     userId: v.optional(v.string()),
+    storageId: v.optional(v.id("_storage")), // Convex storage ID
   },
   handler: async (ctx, args) => {
-    // Insert file metadata
+    // Insert file metadata with storage ID
     const fileId = await ctx.db.insert("files", {
       fileName: args.fileName,
       fileSize: args.fileSize,
       userId: args.userId,
       createdAt: Date.now(),
+      storageId: args.storageId,
     });
 
     // Insert file content
@@ -32,7 +43,7 @@ export const saveFileAndContent = internalMutation({
   },
 });
 
-// Upload multiple TXT files
+// Upload multiple TXT files with file storage
 export const uploadFiles = action({
   args: {
     files: v.array(
@@ -40,6 +51,7 @@ export const uploadFiles = action({
         fileName: v.string(),
         fileSize: v.number(),
         content: v.string(),
+        storageId: v.optional(v.id("_storage")), // Storage ID from client upload
       })
     ),
     userId: v.optional(v.string()),
@@ -47,11 +59,14 @@ export const uploadFiles = action({
   handler: async (
     ctx,
     args
-  ): Promise<Array<{ success: boolean; fileName: string; fileId?: string; error?: string }>> => {
-    const results: Array<{ success: boolean; fileName: string; fileId?: string; error?: string }> = [];
+  ): Promise<Array<{ success: boolean; fileName: string; fileId?: string; storageId?: string; error?: string }>> => {
+    console.log("[FILES] uploadFiles action called");
+    const results: Array<{ success: boolean; fileName: string; fileId?: string; storageId?: string; error?: string }> = [];
 
     for (const file of args.files) {
       try {
+        const storageId = file.storageId;
+
         // Save file metadata and content to database
         const { fileId, contentLength } = await ctx.runMutation(
           internal.files.saveFileAndContent,
@@ -60,6 +75,7 @@ export const uploadFiles = action({
             fileSize: file.fileSize,
             content: file.content,
             userId: args.userId,
+            storageId,
           }
         );
 
@@ -78,21 +94,26 @@ export const uploadFiles = action({
         });
 
         // Ingest content into RAG with embeddings
+        const metadata: Record<string, string | number> = {
+          title: file.fileName.replace(".txt", ""),
+          userId: args.userId ?? "anonymous",
+          fileId,
+          fileSize: file.fileSize,
+        };
+        if (storageId) {
+          metadata.storageId = storageId;
+        }
         await rag.add(ctx, {
           namespace: RAG_NAMESPACE,
           text: file.content,
-          metadata: {
-            title: file.fileName.replace(".txt", ""),
-            userId: args.userId ?? "anonymous",
-            fileId,
-            fileSize: file.fileSize,
-          },
+          metadata,
         });
 
         results.push({
           success: true,
           fileName: file.fileName,
           fileId,
+          storageId,
         });
       } catch (error) {
         results.push({
@@ -191,6 +212,14 @@ export const deleteFile = mutation({
     fileId: v.id("files"),
   },
   handler: async (ctx, args) => {
+    // Get file metadata to retrieve storageId
+    const file = await ctx.db.get(args.fileId);
+    
+    if (file && file.storageId) {
+      // Delete file from Convex file storage
+      await ctx.storage.delete(file.storageId);
+    }
+    
     // Delete file content
     const contentRecord = await ctx.db
       .query("fileContent")

@@ -32,6 +32,7 @@ export default defineSchema({
     fileSize: v.number(),
     userId: v.optional(v.string()),
     createdAt: v.number(),
+    storageId: v.optional(v.id("_storage")), // Convex file storage ID
   }).index("by_userId", ["userId"]),
 
   // FileContent table - stores the actual content of uploaded TXT files
@@ -48,6 +49,7 @@ export default defineSchema({
     createdAt: v.number(),
     status: v.string(), // "processing", "embedded", "failed"
     mimeType: v.string(), // "application/pdf"
+    storageId: v.optional(v.id("_storage")), // Convex file storage ID
   }).index("by_userId", ["userId"]),
 
   // PDFContent table - stores the extracted text content from PDFs

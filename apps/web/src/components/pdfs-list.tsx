@@ -1,6 +1,7 @@
 "use client";
 
-import { useQuery } from "convex/react";
+import { useState } from "react";
+import { useQuery, useMutation } from "convex/react";
 import { api } from "@mirpr-ppi/backend/convex/_generated/api";
 import {
   FileIcon,
@@ -8,6 +9,7 @@ import {
   AlertCircleIcon,
   HourglassIcon,
   Loader2Icon,
+  Trash2Icon,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Card } from "@/components/ui/card";
@@ -33,6 +35,19 @@ function formatTimeAgo(timestamp: number): string {
 
 export function PdfsList({ userId }: PdfsListProps) {
   const pdfs = useQuery(api.pdfs.listPdfs, { userId });
+  const deletePdf = useMutation(api.pdfs.deletePdf);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const handleDelete = async (pdfId: string) => {
+    setDeletingId(pdfId);
+    try {
+      await deletePdf({ pdfId: pdfId as any });
+    } catch (error) {
+      console.error("Failed to delete PDF:", error);
+    } finally {
+      setDeletingId(null);
+    }
+  };
 
   if (pdfs === undefined) {
     return (
@@ -97,6 +112,21 @@ export function PdfsList({ userId }: PdfsListProps) {
                       </span>
                     </>
                   )}
+
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => handleDelete(pdf._id)}
+                    disabled={deletingId === pdf._id}
+                    className="h-6 w-6 p-0 ml-2"
+                    title="Remove PDF"
+                  >
+                    {deletingId === pdf._id ? (
+                      <Loader2Icon className="h-4 w-4 animate-spin" />
+                    ) : (
+                      <Trash2Icon className="h-4 w-4 text-muted-foreground hover:text-red-600" />
+                    )}
+                  </Button>
                 </div>
               </div>
             </div>

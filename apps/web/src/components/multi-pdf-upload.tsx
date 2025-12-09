@@ -17,6 +17,39 @@ import {
 import { cn } from "@/lib/utils";
 import { Progress } from "@/components/ui/progress";
 
+// Module-level state for PDF.js
+const pdfjsState = {
+  initialized: false,
+  configPromise: null as Promise<any> | null,
+  module: null as any,
+};
+
+// Initialize PDF.js and configure worker
+const getPdfJs = async () => {
+  if (pdfjsState.initialized && pdfjsState.module) {
+    return pdfjsState.module;
+  }
+
+  if (pdfjsState.configPromise) {
+    return pdfjsState.configPromise;
+  }
+
+  if (typeof window === "undefined") {
+    throw new Error("PDF.js can only be used on the client");
+  }
+
+  pdfjsState.configPromise = (async () => {
+    const pdfjsLib = await import("pdfjs-dist");
+    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
+    pdfjsState.module = pdfjsLib;
+    pdfjsState.initialized = true;
+    console.log(`PDF.js v${pdfjsLib.version} initialized with CDN worker`);
+    return pdfjsLib;
+  })();
+
+  return pdfjsState.configPromise;
+};
+
 interface UploadedPdf {
   file: File;
   extractedText?: string;
@@ -140,9 +173,8 @@ export function MultiPdfUpload({
     try {
       console.log(`Starting PDF extraction for: ${file.name}`);
       
-      // Import pdfjs-dist
-      const { getDocument } = await import("pdfjs-dist");
-      console.log(`PDF.js library loaded`);
+      const pdfjsLib = await getPdfJs();
+      const { getDocument } = pdfjsLib;
 
       const arrayBuffer = await file.arrayBuffer();
       console.log(`File loaded, size: ${arrayBuffer.byteLength} bytes`);
@@ -153,13 +185,17 @@ export function MultiPdfUpload({
       let text = "";
 
       for (let i = 1; i <= pdf.numPages; i++) {
-        const page = await pdf.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items
-          .map((item: any) => item.str || "")
-          .join(" ");
-        text += pageText + "\n";
-        console.log(`Extracted page ${i} of ${pdf.numPages}`);
+        try {
+          const page = await pdf.getPage(i);
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items
+            .map((item: any) => item.str || "")
+            .join(" ");
+          text += pageText + "\n";
+          console.log(`Extracted page ${i} of ${pdf.numPages}`);
+        } catch (pageError) {
+          console.warn(`Failed to extract page ${i}:`, pageError);
+        }
       }
 
       const finalText = text.trim();
@@ -187,8 +223,6 @@ export function MultiPdfUpload({
         pageCount: p.pageCount,
         mimeType: p.file.type || "application/pdf",
       }));
-
-    console.log(`Ready to upload ${readyPdfs.length} PDFs`, readyPdfs);
 
     if (readyPdfs.length === 0) {
       console.warn("No PDFs ready for upload. Selected PDFs:", selectedPdfs);

@@ -13,9 +13,42 @@ import { vStreamArgs } from "@convex-dev/agent/validators";
 import { paginationOptsValidator } from "convex/server";
 import { z } from "zod/v3";
 import { rag } from "./rag";
+import { AI_CONFIG, isLocalMode } from "./ai/config";
+import { fetchLocalResponse } from "./ai/localResponse";
+import { RAG_NAMESPACE, AGENT_INSTRUCTIONS, DEMO_USER } from "./ai/constants";
 
-// Namespace for RAG search
-const RAG_NAMESPACE = "knowledge-base";
+// Keywords that suggest the user wants to search the knowledge base
+const RAG_TRIGGER_KEYWORDS = [
+  "search",
+  "find",
+  "look up",
+  "knowledge",
+  "document",
+  "info about",
+  "tell me about",
+  "what is",
+  "what are",
+  "how to",
+  "explain",
+  "describe",
+];
+
+// Check if the prompt likely needs RAG context
+function shouldUseRAG(prompt: string): boolean {
+  const lowerPrompt = prompt.toLowerCase();
+  return RAG_TRIGGER_KEYWORDS.some((keyword) => lowerPrompt.includes(keyword));
+}
+
+// Query to expose AI mode to frontend
+export const getAIMode = query({
+  args: {},
+  handler: async () => {
+    return {
+      mode: isLocalMode() ? "local" : "cloud",
+      isLocalMode: isLocalMode(),
+    } as const;
+  },
+});
 
 // Tool to search knowledge base using RAG
 const searchKnowledge = createTool({
@@ -25,6 +58,8 @@ const searchKnowledge = createTool({
     query: z.string().describe("The search query to find relevant information"),
   }),
   handler: async (ctx, args): Promise<string> => {
+    // Both modes use the same API - the RAG component handles embeddings
+    // based on the configured textEmbeddingModel
     const searchResult = await rag.search(ctx, {
       namespace: RAG_NAMESPACE,
       query: args.query,
@@ -37,7 +72,9 @@ const searchKnowledge = createTool({
 
     const formattedResults = searchResult.results
       .map((result, index) => {
-        const metadata = result.content[0]?.metadata as { title?: string } | undefined;
+        const metadata = result.content[0]?.metadata as
+          | { title?: string }
+          | undefined;
         const text = result.content.map((c) => c.text).join("\n");
         return `[${index + 1}] ${metadata?.title ?? "Document"}\n${text}`;
       })
@@ -78,53 +115,38 @@ const collectFeedback = createTool({
         return `Thank you ${args.name}! Your feedback has been submitted successfully. A confirmation email has been sent to ${args.email}.`;
       }
       return `There was an issue submitting your feedback: ${result.error}. Please try again.`;
-    } catch (error) {
+    } catch {
       return "Sorry, there was an error submitting your feedback. Please try again later.";
     }
   },
 });
 
-// Agent instructions with feedback flow guidance
-const AGENT_INSTRUCTIONS = `You are a helpful AI assistant with access to a knowledge base and the ability to collect user feedback.
-
-## Knowledge Base
-When users ask questions, use the searchKnowledge tool to find relevant information from the knowledge base. Always search before answering questions that might be covered by uploaded documents.
-
-## Feedback Collection
-You can help users leave feedback about the service. When a user wants to leave feedback:
-1. First, ask them what feedback they'd like to share
-2. If their feedback is unclear or too brief, ask for more details or clarification
-3. Once you have clear feedback, ask for their name
-4. Then ask for their email address
-5. Finally, use the collectFeedback tool to submit their feedback
-
-If a user says they want to leave feedback, start the feedback collection process. Be conversational and friendly throughout.
-
-## General Guidelines
-- Be helpful and conversational
-- Use markdown formatting for better readability (tables, lists, code blocks when appropriate)
-- If you don't know something and it's not in the knowledge base, be honest about it
-- Occasionally (after a few helpful exchanges), you can ask if the user would like to leave feedback about their experience`;
-
-// Create the agent with tools
-const agent = new Agent(components.agent, {
-  name: "AI Assistant",
-  languageModel: openai.chat("gpt-4o-mini"),
-  textEmbeddingModel: openai.embedding("text-embedding-3-small"),
-  instructions: AGENT_INSTRUCTIONS,
-  tools: {
-    searchKnowledge,
-    collectFeedback,
-  },
-  maxSteps: 10,
-});
-
-const DEMO_USER = "demo-user";
+// Create agent for CLOUD MODE ONLY
+// For local mode, we bypass the agent component and use direct HTTP calls
+const cloudAgent = isLocalMode()
+  ? null
+  : new Agent(components.agent, {
+      name: "AI Assistant",
+      languageModel: openai.chat(AI_CONFIG.openai.chatModel),
+      textEmbeddingModel: openai.embedding(AI_CONFIG.openai.embeddingModel),
+      instructions: AGENT_INSTRUCTIONS,
+      tools: {
+        searchKnowledge,
+        collectFeedback,
+      },
+      maxSteps: 10,
+    });
 
 // Create a new agent thread
 export const createAgentThread = mutation({
   args: {},
   handler: async (ctx) => {
+    if (isLocalMode()) {
+      // For local mode, create a simple thread ID
+      // Note: Local mode doesn't persist conversation history in the agent component
+      return `local-thread-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+    }
+
     const threadId = await createThread(ctx, components.agent, {
       userId: DEMO_USER,
     });
@@ -148,14 +170,58 @@ export const initiateStream = mutation({
   },
 });
 
-// Internal action to send message to agent
+// Internal action to send message to agent - handles both modes
 export const sendMessageToAgentInternal = internalAction({
   args: {
     threadId: v.string(),
     prompt: v.string(),
+    useRAG: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { thread } = await agent.continueThread(ctx, {
+    if (isLocalMode()) {
+      // LOCAL MODE: Direct HTTP call to local service
+      // Only search RAG if the prompt suggests it's needed (saves ~1-2s per query)
+      const needsRAG = args.useRAG ?? shouldUseRAG(args.prompt);
+
+      let context = "";
+      if (needsRAG) {
+        const searchResult = await rag.search(ctx, {
+          namespace: RAG_NAMESPACE,
+          query: args.prompt,
+          limit: 3,
+        });
+
+        if (searchResult.results.length > 0) {
+          context = searchResult.results
+            .map((r) => r.content.map((c) => c.text).join("\n"))
+            .join("\n\n---\n\n");
+        }
+      }
+
+      // Build messages with context
+      const userContent = context
+        ? `Context from knowledge base:\n${context}\n\n---\n\nUser question: ${args.prompt}`
+        : args.prompt;
+
+      const response = await fetchLocalResponse({
+        instructions: AGENT_INSTRUCTIONS,
+        messages: [
+          {
+            role: "user",
+            content: userContent,
+          },
+        ],
+      });
+
+      return response;
+    }
+
+    // CLOUD MODE: Use agent component
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized - configuration error");
+    }
+
+    const { thread } = await cloudAgent.continueThread(ctx, {
       threadId: args.threadId,
     });
     const result = await thread.streamText(
@@ -171,9 +237,52 @@ export const sendMessageToAgent = action({
   args: {
     threadId: v.string(),
     prompt: v.string(),
+    useRAG: v.optional(v.boolean()), // Optional: force RAG on/off
   },
   handler: async (ctx, args) => {
-    const { thread } = await agent.continueThread(ctx, {
+    if (isLocalMode()) {
+      // LOCAL MODE: Direct HTTP call to local service
+      // Only search RAG if the prompt suggests it's needed (saves ~1-2s per query)
+      const needsRAG = args.useRAG ?? shouldUseRAG(args.prompt);
+
+      let context = "";
+      if (needsRAG) {
+        const searchResult = await rag.search(ctx, {
+          namespace: RAG_NAMESPACE,
+          query: args.prompt,
+          limit: 3,
+        });
+
+        if (searchResult.results.length > 0) {
+          context = searchResult.results
+            .map((r) => r.content.map((c) => c.text).join("\n"))
+            .join("\n\n---\n\n");
+        }
+      }
+
+      const userContent = context
+        ? `Context from knowledge base:\n${context}\n\n---\n\nUser question: ${args.prompt}`
+        : args.prompt;
+
+      const response = await fetchLocalResponse({
+        instructions: AGENT_INSTRUCTIONS,
+        messages: [
+          {
+            role: "user",
+            content: userContent,
+          },
+        ],
+      });
+
+      return response;
+    }
+
+    // CLOUD MODE: Use agent component
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized - configuration error");
+    }
+
+    const { thread } = await cloudAgent.continueThread(ctx, {
       threadId: args.threadId,
     });
     const result = await thread.streamText(
@@ -192,6 +301,17 @@ export const listThreadMessages = query({
     streamArgs: vStreamArgs,
   },
   handler: async (ctx, args) => {
+    if (isLocalMode()) {
+      // LOCAL MODE: Return empty results since we don't persist messages
+      // You could implement a custom messages table for local mode if needed
+      return {
+        page: [],
+        isDone: true,
+        continueCursor: "",
+        streams: {},
+      };
+    }
+
     const paginated = await listUIMessages(ctx, components.agent, {
       threadId: args.threadId,
       paginationOpts: args.paginationOpts,
@@ -210,9 +330,22 @@ export const listThreadMessages = query({
 export const helloWorld = action({
   args: { city: v.string() },
   handler: async (ctx, { city }) => {
-    const threadId = await createThread(ctx, components.agent);
     const prompt = `What is the weather in ${city}?`;
-    const result = await agent.generateText(ctx, { threadId }, { prompt });
+
+    if (isLocalMode()) {
+      const response = await fetchLocalResponse({
+        instructions: "You are a helpful weather assistant.",
+        messages: [{ role: "user", content: prompt }],
+      });
+      return response;
+    }
+
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized - configuration error");
+    }
+
+    const threadId = await createThread(ctx, components.agent);
+    const result = await cloudAgent.generateText(ctx, { threadId }, { prompt });
     return result.text;
   },
 });

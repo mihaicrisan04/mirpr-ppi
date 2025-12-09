@@ -25,4 +25,37 @@ export default defineSchema({
     threadId: v.optional(v.string()),
     createdAt: v.number(),
   }).index("by_email", ["email"]),
+
+  // Files table - stores metadata for uploaded TXT files
+  files: defineTable({
+    fileName: v.string(),
+    fileSize: v.number(),
+    userId: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index("by_userId", ["userId"]),
+
+  // FileContent table - stores the actual content of uploaded TXT files
+  fileContent: defineTable({
+    fileId: v.id("files"),
+    content: v.string(),
+  }).index("by_fileId", ["fileId"]),
+
+  // PDFs table - stores metadata for uploaded PDF files
+  pdfs: defineTable({
+    fileName: v.string(),
+    fileSize: v.number(),
+    userId: v.optional(v.string()),
+    createdAt: v.number(),
+    status: v.string(), // "processing", "embedded", "failed"
+    mimeType: v.string(), // "application/pdf"
+  }).index("by_userId", ["userId"]),
+
+  // PDFContent table - stores the extracted text content from PDFs
+  pdfContent: defineTable({
+    pdfId: v.id("pdfs"),
+    content: v.string(), // extracted text
+    rawText: v.string(), // unprocessed extracted text for RAG
+    pageCount: v.optional(v.number()),
+    extractedAt: v.number(),
+  }).index("by_pdfId", ["pdfId"]),
 });

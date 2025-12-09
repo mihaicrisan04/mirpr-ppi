@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { Moon, Sun } from "lucide-react";
 import { useTheme } from "next-themes";
 import { Button } from "@/components/ui/button";
@@ -12,6 +13,20 @@ import {
 
 export function ModeToggle() {
   const { setTheme } = useTheme();
+  const [mounted, setMounted] = useState(false);
+
+  // Prevent hydration mismatch by only rendering after mounting
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  if (!mounted) {
+    return (
+      <Button size="icon" variant="outline" disabled>
+        <Sun className="h-[1.2rem] w-[1.2rem]" />
+      </Button>
+    );
+  }
 
   return (
     <DropdownMenu>

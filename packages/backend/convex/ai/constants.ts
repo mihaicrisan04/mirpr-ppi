@@ -1,8 +1,12 @@
 // Shared AI-related constants
 
+// Base RAG namespace for global knowledge base
 export const RAG_NAMESPACE = "knowledge-base";
 
-export const DEMO_USER = "demo-user";
+// Generate user-specific RAG namespace
+export function getUserRAGNamespace(userId: string): string {
+  return `knowledge-base-${userId}`;
+}
 
 export const AGENT_INSTRUCTIONS = `
 You are a helpful AI assistant with access to a knowledge base and the ability to collect user feedback.

@@ -7,37 +7,20 @@ import {
   createTool,
 } from "@convex-dev/agent";
 import { openai } from "@ai-sdk/openai";
-import { action, mutation, query, internalAction } from "./_generated/server";
+import {
+  action,
+  mutation,
+  query,
+  internalAction,
+} from "./_generated/server";
 import { v } from "convex/values";
 import { vStreamArgs } from "@convex-dev/agent/validators";
 import { paginationOptsValidator } from "convex/server";
 import { z } from "zod/v3";
 import { rag } from "./rag";
 import { AI_CONFIG, isLocalMode } from "./ai/config";
-import { fetchLocalResponse } from "./ai/localResponse";
-import { RAG_NAMESPACE, AGENT_INSTRUCTIONS, DEMO_USER } from "./ai/constants";
-
-// Keywords that suggest the user wants to search the knowledge base
-const RAG_TRIGGER_KEYWORDS = [
-  "search",
-  "find",
-  "look up",
-  "knowledge",
-  "document",
-  "info about",
-  "tell me about",
-  "what is",
-  "what are",
-  "how to",
-  "explain",
-  "describe",
-];
-
-// Check if the prompt likely needs RAG context
-function shouldUseRAG(prompt: string): boolean {
-  const lowerPrompt = prompt.toLowerCase();
-  return RAG_TRIGGER_KEYWORDS.some((keyword) => lowerPrompt.includes(keyword));
-}
+import { RAG_NAMESPACE, AGENT_INSTRUCTIONS } from "./ai/constants";
+import { authComponent } from "./auth";
 
 // Query to expose AI mode to frontend
 export const getAIMode = query({
@@ -53,13 +36,11 @@ export const getAIMode = query({
 // Tool to search knowledge base using RAG
 const searchKnowledge = createTool({
   description:
-    "Search the knowledge base for relevant information. Use this tool when the user asks a question that might be answered by documents in the knowledge base.",
+    "Search the knowledge base for relevant information. Use this tool when the user asks a question that might be answered by documents in the knowledge base. Always search before answering questions about specific topics.",
   args: z.object({
     query: z.string().describe("The search query to find relevant information"),
   }),
   handler: async (ctx, args): Promise<string> => {
-    // Both modes use the same API - the RAG component handles embeddings
-    // based on the configured textEmbeddingModel
     const searchResult = await rag.search(ctx, {
       namespace: RAG_NAMESPACE,
       query: args.query,
@@ -121,8 +102,8 @@ const collectFeedback = createTool({
   },
 });
 
-// Create agent for CLOUD MODE ONLY
-// For local mode, we bypass the agent component and use direct HTTP calls
+// Create agent for CLOUD MODE
+// Local mode is not supported for streaming - cloud mode required
 const cloudAgent = isLocalMode()
   ? null
   : new Agent(components.agent, {
@@ -137,86 +118,137 @@ const cloudAgent = isLocalMode()
       maxSteps: 10,
     });
 
-// Create a new agent thread
+// ============================================================================
+// THREAD MANAGEMENT
+// ============================================================================
+
+// Create a new agent thread for a user
 export const createAgentThread = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    userId: v.string(),
+  },
+  handler: async (ctx, args) => {
     if (isLocalMode()) {
-      // For local mode, create a simple thread ID
-      // Note: Local mode doesn't persist conversation history in the agent component
-      return `local-thread-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+      throw new Error(
+        "Local mode is not supported. Please use cloud mode (OpenAI) for streaming."
+      );
     }
 
     const threadId = await createThread(ctx, components.agent, {
-      userId: DEMO_USER,
+      userId: args.userId,
     });
     return threadId;
   },
 });
 
-// Initiate streaming message to agent
+// List all threads for a user
+export const listUserThreads = query({
+  args: {
+    userId: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const threads = await ctx.runQuery(
+      components.agent.threads.listThreadsByUserId,
+      {
+        userId: args.userId,
+        paginationOpts: args.paginationOpts,
+      }
+    );
+    return threads;
+  },
+});
+
+// Get thread metadata
+export const getThread = query({
+  args: {
+    threadId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const thread = await ctx.runQuery(components.agent.threads.getThread, {
+      threadId: args.threadId,
+    });
+    return thread;
+  },
+});
+
+// Update thread title
+export const updateThreadTitle = mutation({
+  args: {
+    threadId: v.string(),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized");
+    }
+
+    await cloudAgent.updateThreadMetadata(ctx, {
+      threadId: args.threadId,
+      patch: {
+        title: args.title,
+      },
+    });
+  },
+});
+
+// Delete a thread
+export const deleteThread = mutation({
+  args: {
+    threadId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized");
+    }
+
+    await cloudAgent.deleteThreadAsync(ctx, {
+      threadId: args.threadId,
+    });
+  },
+});
+
+// ============================================================================
+// MESSAGING
+// ============================================================================
+
+// Initiate streaming message to agent - this is the main entry point for chat
 export const initiateStream = mutation({
   args: {
     threadId: v.string(),
     prompt: v.string(),
   },
   handler: async (ctx, args) => {
-    // This mutation is for optimistic updates and triggering the action
-    // The actual streaming happens in the background via scheduler
-    await ctx.scheduler.runAfter(0, internal.agent.sendMessageToAgentInternal, {
+    if (isLocalMode() || !cloudAgent) {
+      throw new Error(
+        "Streaming requires cloud mode. Please configure OpenAI."
+      );
+    }
+
+    // Save the user message first - this is required for the streaming pattern
+    const { messageId } = await cloudAgent.saveMessage(ctx, {
       threadId: args.threadId,
       prompt: args.prompt,
+      skipEmbeddings: true, // Skip for faster response, embeddings not needed for user messages
     });
+
+    // Schedule the streaming action to run immediately
+    await ctx.scheduler.runAfter(0, internal.agent.streamResponseAsync, {
+      threadId: args.threadId,
+      promptMessageId: messageId,
+    });
+
+    return { messageId };
   },
 });
 
-// Internal action to send message to agent - handles both modes
-export const sendMessageToAgentInternal = internalAction({
+// Internal action to stream the response - runs asynchronously
+export const streamResponseAsync = internalAction({
   args: {
     threadId: v.string(),
-    prompt: v.string(),
-    useRAG: v.optional(v.boolean()),
+    promptMessageId: v.string(),
   },
   handler: async (ctx, args) => {
-    if (isLocalMode()) {
-      // LOCAL MODE: Direct HTTP call to local service
-      // Only search RAG if the prompt suggests it's needed (saves ~1-2s per query)
-      const needsRAG = args.useRAG ?? shouldUseRAG(args.prompt);
-
-      let context = "";
-      if (needsRAG) {
-        const searchResult = await rag.search(ctx, {
-          namespace: RAG_NAMESPACE,
-          query: args.prompt,
-          limit: 3,
-        });
-
-        if (searchResult.results.length > 0) {
-          context = searchResult.results
-            .map((r) => r.content.map((c) => c.text).join("\n"))
-            .join("\n\n---\n\n");
-        }
-      }
-
-      // Build messages with context
-      const userContent = context
-        ? `Context from knowledge base:\n${context}\n\n---\n\nUser question: ${args.prompt}`
-        : args.prompt;
-
-      const response = await fetchLocalResponse({
-        instructions: AGENT_INSTRUCTIONS,
-        messages: [
-          {
-            role: "user",
-            content: userContent,
-          },
-        ],
-      });
-
-      return response;
-    }
-
-    // CLOUD MODE: Use agent component
     if (!cloudAgent) {
       throw new Error("Agent not initialized - configuration error");
     }
@@ -224,72 +256,23 @@ export const sendMessageToAgentInternal = internalAction({
     const { thread } = await cloudAgent.continueThread(ctx, {
       threadId: args.threadId,
     });
+
+    // Stream text with delta saving for real-time updates
     const result = await thread.streamText(
-      { prompt: args.prompt },
-      { saveStreamDeltas: true }
-    );
-    return result.text;
-  },
-});
-
-// Direct action to send message to agent (non-streaming)
-export const sendMessageToAgent = action({
-  args: {
-    threadId: v.string(),
-    prompt: v.string(),
-    useRAG: v.optional(v.boolean()), // Optional: force RAG on/off
-  },
-  handler: async (ctx, args) => {
-    if (isLocalMode()) {
-      // LOCAL MODE: Direct HTTP call to local service
-      // Only search RAG if the prompt suggests it's needed (saves ~1-2s per query)
-      const needsRAG = args.useRAG ?? shouldUseRAG(args.prompt);
-
-      let context = "";
-      if (needsRAG) {
-        const searchResult = await rag.search(ctx, {
-          namespace: RAG_NAMESPACE,
-          query: args.prompt,
-          limit: 3,
-        });
-
-        if (searchResult.results.length > 0) {
-          context = searchResult.results
-            .map((r) => r.content.map((c) => c.text).join("\n"))
-            .join("\n\n---\n\n");
-        }
+      { promptMessageId: args.promptMessageId },
+      {
+        saveStreamDeltas: {
+          chunking: "word", // Save word-by-word for smooth streaming
+          throttleMs: 50, // Throttle writes to avoid too many DB operations
+        },
       }
-
-      const userContent = context
-        ? `Context from knowledge base:\n${context}\n\n---\n\nUser question: ${args.prompt}`
-        : args.prompt;
-
-      const response = await fetchLocalResponse({
-        instructions: AGENT_INSTRUCTIONS,
-        messages: [
-          {
-            role: "user",
-            content: userContent,
-          },
-        ],
-      });
-
-      return response;
-    }
-
-    // CLOUD MODE: Use agent component
-    if (!cloudAgent) {
-      throw new Error("Agent not initialized - configuration error");
-    }
-
-    const { thread } = await cloudAgent.continueThread(ctx, {
-      threadId: args.threadId,
-    });
-    const result = await thread.streamText(
-      { prompt: args.prompt },
-      { saveStreamDeltas: true }
     );
-    return result.text;
+
+    // Consume the stream to ensure it completes
+    // This is required - without it, the stream won't be fully processed
+    await result.consumeStream();
+
+    return { success: true };
   },
 });
 
@@ -301,22 +284,13 @@ export const listThreadMessages = query({
     streamArgs: vStreamArgs,
   },
   handler: async (ctx, args) => {
-    if (isLocalMode()) {
-      // LOCAL MODE: Return empty results since we don't persist messages
-      // You could implement a custom messages table for local mode if needed
-      return {
-        page: [],
-        isDone: true,
-        continueCursor: "",
-        streams: {},
-      };
-    }
-
+    // Fetch regular non-streaming messages with pagination
     const paginated = await listUIMessages(ctx, components.agent, {
       threadId: args.threadId,
       paginationOpts: args.paginationOpts,
     });
 
+    // Sync streaming deltas for real-time updates
     const streams = await syncStreams(ctx, components.agent, {
       threadId: args.threadId,
       streamArgs: args.streamArgs,
@@ -326,24 +300,44 @@ export const listThreadMessages = query({
   },
 });
 
-// Legacy exports for backward compatibility
+// ============================================================================
+// LEGACY FUNCTIONS (kept for backward compatibility)
+// ============================================================================
+
+// Legacy action for non-streaming use cases
+export const sendMessageToAgent = action({
+  args: {
+    threadId: v.string(),
+    prompt: v.string(),
+    useRAG: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    if (isLocalMode() || !cloudAgent) {
+      throw new Error(
+        "This action requires cloud mode. Please configure OpenAI."
+      );
+    }
+
+    const { thread } = await cloudAgent.continueThread(ctx, {
+      threadId: args.threadId,
+    });
+
+    const result = await thread.generateText({
+      prompt: args.prompt,
+    });
+
+    return result.text;
+  },
+});
+
 export const helloWorld = action({
   args: { city: v.string() },
   handler: async (ctx, { city }) => {
+    if (isLocalMode() || !cloudAgent) {
+      throw new Error("This action requires cloud mode.");
+    }
+
     const prompt = `What is the weather in ${city}?`;
-
-    if (isLocalMode()) {
-      const response = await fetchLocalResponse({
-        instructions: "You are a helpful weather assistant.",
-        messages: [{ role: "user", content: prompt }],
-      });
-      return response;
-    }
-
-    if (!cloudAgent) {
-      throw new Error("Agent not initialized - configuration error");
-    }
-
     const threadId = await createThread(ctx, components.agent);
     const result = await cloudAgent.generateText(ctx, { threadId }, { prompt });
     return result.text;

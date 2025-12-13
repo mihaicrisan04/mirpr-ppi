@@ -1,61 +1,110 @@
 "use client";
 
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@mirpr-ppi/backend/convex/_generated/api";
-import { useEffect, useState } from "react";
-import { ThreadView } from "./thread-view";
-import { Loader2Icon } from "lucide-react";
+import { useCallback, useState } from "react";
+import { useRouter } from "next/navigation";
+import { Loader2Icon, SendIcon, SparklesIcon } from "lucide-react";
+import {
+  PromptInput,
+  PromptInputBody,
+  PromptInputTextarea,
+  PromptInputSubmit,
+} from "@/components/ai-elements/prompt-input";
 
-export default function ChatPage() {
+export default function NewChatPage() {
+  const router = useRouter();
+  const user = useQuery(api.auth.getCurrentUser);
   const createThread = useMutation(api.agent.createAgentThread);
-  const [threadId, setThreadId] = useState<string | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const initiateStream = useMutation(api.agent.initiateStream);
 
-  // Auto-create thread on page load
-  useEffect(() => {
-    const initThread = async () => {
+  const [isCreating, setIsCreating] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const handleSubmit = useCallback(
+    async (message: { text?: string }) => {
+      if (!message.text?.trim() || !user?._id || isCreating) return;
+
+      setIsCreating(true);
+      setError(null);
+
       try {
-        const id = await createThread();
-        setThreadId(id);
-      } catch (error) {
-        // Error creating thread - will show error state
-      } finally {
-        setIsLoading(false);
+        // Create new thread
+        const threadId = await createThread({ userId: user._id });
+
+        // Send the first message
+        await initiateStream({
+          threadId,
+          prompt: message.text.trim(),
+        });
+
+        // Redirect to the thread page
+        router.push(`/chat/${threadId}`);
+      } catch (err) {
+        console.error("Failed to start conversation:", err);
+        setError(
+          err instanceof Error ? err.message : "Failed to start conversation"
+        );
+        setIsCreating(false);
       }
-    };
+    },
+    [user?._id, createThread, initiateStream, router, isCreating]
+  );
 
-    initThread();
-  }, [createThread]);
-
-  if (isLoading) {
+  // Loading state while checking auth (layout handles redirect if not logged in)
+  if (user === undefined) {
     return (
-      <div className="flex h-full items-center justify-center p-6">
-        <div className="flex flex-col items-center gap-4">
-          <Loader2Icon className="size-8 animate-spin text-muted-foreground" />
-          <p className="text-muted-foreground text-sm">
-            Starting conversation...
-          </p>
-        </div>
-      </div>
-    );
-  }
-
-  if (!threadId) {
-    return (
-      <div className="flex h-full items-center justify-center p-6">
-        <div className="flex flex-col items-center gap-4 text-center">
-          <p className="text-destructive">
-            Failed to start conversation. Please refresh the page.
-          </p>
-        </div>
+      <div className="flex h-full items-center justify-center">
+        <Loader2Icon className="size-8 animate-spin text-muted-foreground" />
       </div>
     );
   }
 
   return (
-    <div className="flex h-full flex-col p-4">
-      <div className="mx-auto w-full max-w-4xl flex-1">
-        <ThreadView threadId={threadId} />
+    <div className="flex h-full flex-col items-center justify-center p-4">
+      <div className="w-full max-w-2xl space-y-8">
+        {/* Welcome message */}
+        <div className="text-center">
+          <h1 className="mb-2 font-semibold text-2xl">How can I help you today?</h1>
+          <p className="text-muted-foreground">
+            Start a conversation by typing your message below.
+          </p>
+        </div>
+
+        {/* Error message */}
+        {error && (
+          <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-4 text-center text-destructive text-sm">
+            {error}
+            {error.includes("cloud mode") && (
+              <p className="mt-1 text-muted-foreground text-xs">
+                Please configure OpenAI API key in your environment variables.
+              </p>
+            )}
+          </div>
+        )}
+
+        {/* Input */}
+        <PromptInput onSubmit={handleSubmit}>
+          <PromptInputBody>
+            <PromptInputTextarea
+              placeholder={
+                isCreating ? "Starting conversation..." : "Type your message..."
+              }
+              className="min-h-20 resize-none pt-7"
+              disabled={isCreating}
+              autoFocus
+            />
+          </PromptInputBody>
+          <div className="flex justify-end p-2">
+            <PromptInputSubmit disabled={isCreating}>
+              {isCreating ? (
+                <Loader2Icon className="size-4 animate-spin" />
+              ) : (
+                <SendIcon className="size-4" />
+              )}
+            </PromptInputSubmit>
+          </div>
+        </PromptInput>
       </div>
     </div>
   );

@@ -7,20 +7,36 @@ import {
   createTool,
 } from "@convex-dev/agent";
 import { openai } from "@ai-sdk/openai";
-import { action, mutation, query, internalAction } from "./_generated/server";
+import {
+  action,
+  mutation,
+  query,
+  internalAction,
+} from "./_generated/server";
 import { v } from "convex/values";
 import { vStreamArgs } from "@convex-dev/agent/validators";
 import { paginationOptsValidator } from "convex/server";
 import { z } from "zod/v3";
 import { rag } from "./rag";
+import { AI_CONFIG, isLocalMode } from "./ai/config";
+import { RAG_NAMESPACE, AGENT_INSTRUCTIONS } from "./ai/constants";
+import { authComponent } from "./auth";
 
-// Namespace for RAG search
-const RAG_NAMESPACE = "knowledge-base";
+// Query to expose AI mode to frontend
+export const getAIMode = query({
+  args: {},
+  handler: async () => {
+    return {
+      mode: isLocalMode() ? "local" : "cloud",
+      isLocalMode: isLocalMode(),
+    } as const;
+  },
+});
 
 // Tool to search knowledge base using RAG
 const searchKnowledge = createTool({
   description:
-    "Search the knowledge base for relevant information. Use this tool when the user asks a question that might be answered by documents in the knowledge base.",
+    "Search the knowledge base for relevant information. Use this tool when the user asks a question that might be answered by documents in the knowledge base. Always search before answering questions about specific topics.",
   args: z.object({
     query: z.string().describe("The search query to find relevant information"),
   }),
@@ -37,7 +53,9 @@ const searchKnowledge = createTool({
 
     const formattedResults = searchResult.results
       .map((result, index) => {
-        const metadata = result.content[0]?.metadata as { title?: string } | undefined;
+        const metadata = result.content[0]?.metadata as
+          | { title?: string }
+          | undefined;
         const text = result.content.map((c) => c.text).join("\n");
         return `[${index + 1}] ${metadata?.title ?? "Document"}\n${text}`;
       })
@@ -78,109 +96,183 @@ const collectFeedback = createTool({
         return `Thank you ${args.name}! Your feedback has been submitted successfully. A confirmation email has been sent to ${args.email}.`;
       }
       return `There was an issue submitting your feedback: ${result.error}. Please try again.`;
-    } catch (error) {
+    } catch {
       return "Sorry, there was an error submitting your feedback. Please try again later.";
     }
   },
 });
 
-// Agent instructions with feedback flow guidance
-const AGENT_INSTRUCTIONS = `You are a helpful AI assistant with access to a knowledge base and the ability to collect user feedback.
+// Create agent for CLOUD MODE
+// Local mode is not supported for streaming - cloud mode required
+const cloudAgent = isLocalMode()
+  ? null
+  : new Agent(components.agent, {
+      name: "AI Assistant",
+      languageModel: openai.chat(AI_CONFIG.openai.chatModel),
+      textEmbeddingModel: openai.embedding(AI_CONFIG.openai.embeddingModel),
+      instructions: AGENT_INSTRUCTIONS,
+      tools: {
+        searchKnowledge,
+        collectFeedback,
+      },
+      maxSteps: 10,
+    });
 
-## Knowledge Base
-When users ask questions, use the searchKnowledge tool to find relevant information from the knowledge base. Always search before answering questions that might be covered by uploaded documents.
+// ============================================================================
+// THREAD MANAGEMENT
+// ============================================================================
 
-## Feedback Collection
-You can help users leave feedback about the service. When a user wants to leave feedback:
-1. First, ask them what feedback they'd like to share
-2. If their feedback is unclear or too brief, ask for more details or clarification
-3. Once you have clear feedback, ask for their name
-4. Then ask for their email address
-5. Finally, use the collectFeedback tool to submit their feedback
-
-If a user says they want to leave feedback, start the feedback collection process. Be conversational and friendly throughout.
-
-## General Guidelines
-- Be helpful and conversational
-- Use markdown formatting for better readability (tables, lists, code blocks when appropriate)
-- If you don't know something and it's not in the knowledge base, be honest about it
-- Occasionally (after a few helpful exchanges), you can ask if the user would like to leave feedback about their experience`;
-
-// Create the agent with tools
-const agent = new Agent(components.agent, {
-  name: "AI Assistant",
-  languageModel: openai.chat("gpt-4o-mini"),
-  textEmbeddingModel: openai.embedding("text-embedding-3-small"),
-  instructions: AGENT_INSTRUCTIONS,
-  tools: {
-    searchKnowledge,
-    collectFeedback,
-  },
-  maxSteps: 10,
-});
-
-const DEMO_USER = "demo-user";
-
-// Create a new agent thread
+// Create a new agent thread for a user
 export const createAgentThread = mutation({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    userId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    if (isLocalMode()) {
+      throw new Error(
+        "Local mode is not supported. Please use cloud mode (OpenAI) for streaming."
+      );
+    }
+
     const threadId = await createThread(ctx, components.agent, {
-      userId: DEMO_USER,
+      userId: args.userId,
     });
     return threadId;
   },
 });
 
-// Initiate streaming message to agent
+// List all threads for a user
+export const listUserThreads = query({
+  args: {
+    userId: v.string(),
+    paginationOpts: paginationOptsValidator,
+  },
+  handler: async (ctx, args) => {
+    const threads = await ctx.runQuery(
+      components.agent.threads.listThreadsByUserId,
+      {
+        userId: args.userId,
+        paginationOpts: args.paginationOpts,
+      }
+    );
+    return threads;
+  },
+});
+
+// Get thread metadata
+export const getThread = query({
+  args: {
+    threadId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const thread = await ctx.runQuery(components.agent.threads.getThread, {
+      threadId: args.threadId,
+    });
+    return thread;
+  },
+});
+
+// Update thread title
+export const updateThreadTitle = mutation({
+  args: {
+    threadId: v.string(),
+    title: v.string(),
+  },
+  handler: async (ctx, args) => {
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized");
+    }
+
+    await cloudAgent.updateThreadMetadata(ctx, {
+      threadId: args.threadId,
+      patch: {
+        title: args.title,
+      },
+    });
+  },
+});
+
+// Delete a thread
+export const deleteThread = mutation({
+  args: {
+    threadId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized");
+    }
+
+    await cloudAgent.deleteThreadAsync(ctx, {
+      threadId: args.threadId,
+    });
+  },
+});
+
+// ============================================================================
+// MESSAGING
+// ============================================================================
+
+// Initiate streaming message to agent - this is the main entry point for chat
 export const initiateStream = mutation({
   args: {
     threadId: v.string(),
     prompt: v.string(),
   },
   handler: async (ctx, args) => {
-    // This mutation is for optimistic updates and triggering the action
-    // The actual streaming happens in the background via scheduler
-    await ctx.scheduler.runAfter(0, internal.agent.sendMessageToAgentInternal, {
+    if (isLocalMode() || !cloudAgent) {
+      throw new Error(
+        "Streaming requires cloud mode. Please configure OpenAI."
+      );
+    }
+
+    // Save the user message first - this is required for the streaming pattern
+    const { messageId } = await cloudAgent.saveMessage(ctx, {
       threadId: args.threadId,
       prompt: args.prompt,
+      skipEmbeddings: true, // Skip for faster response, embeddings not needed for user messages
     });
+
+    // Schedule the streaming action to run immediately
+    await ctx.scheduler.runAfter(0, internal.agent.streamResponseAsync, {
+      threadId: args.threadId,
+      promptMessageId: messageId,
+    });
+
+    return { messageId };
   },
 });
 
-// Internal action to send message to agent
-export const sendMessageToAgentInternal = internalAction({
+// Internal action to stream the response - runs asynchronously
+export const streamResponseAsync = internalAction({
   args: {
     threadId: v.string(),
-    prompt: v.string(),
+    promptMessageId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { thread } = await agent.continueThread(ctx, {
-      threadId: args.threadId,
-    });
-    const result = await thread.streamText(
-      { prompt: args.prompt },
-      { saveStreamDeltas: true }
-    );
-    return result.text;
-  },
-});
+    if (!cloudAgent) {
+      throw new Error("Agent not initialized - configuration error");
+    }
 
-// Direct action to send message to agent (non-streaming)
-export const sendMessageToAgent = action({
-  args: {
-    threadId: v.string(),
-    prompt: v.string(),
-  },
-  handler: async (ctx, args) => {
-    const { thread } = await agent.continueThread(ctx, {
+    const { thread } = await cloudAgent.continueThread(ctx, {
       threadId: args.threadId,
     });
+
+    // Stream text with delta saving for real-time updates
     const result = await thread.streamText(
-      { prompt: args.prompt },
-      { saveStreamDeltas: true }
+      { promptMessageId: args.promptMessageId },
+      {
+        saveStreamDeltas: {
+          chunking: "word", // Save word-by-word for smooth streaming
+          throttleMs: 50, // Throttle writes to avoid too many DB operations
+        },
+      }
     );
-    return result.text;
+
+    // Consume the stream to ensure it completes
+    // This is required - without it, the stream won't be fully processed
+    await result.consumeStream();
+
+    return { success: true };
   },
 });
 
@@ -192,11 +284,13 @@ export const listThreadMessages = query({
     streamArgs: vStreamArgs,
   },
   handler: async (ctx, args) => {
+    // Fetch regular non-streaming messages with pagination
     const paginated = await listUIMessages(ctx, components.agent, {
       threadId: args.threadId,
       paginationOpts: args.paginationOpts,
     });
 
+    // Sync streaming deltas for real-time updates
     const streams = await syncStreams(ctx, components.agent, {
       threadId: args.threadId,
       streamArgs: args.streamArgs,
@@ -206,13 +300,46 @@ export const listThreadMessages = query({
   },
 });
 
-// Legacy exports for backward compatibility
+// ============================================================================
+// LEGACY FUNCTIONS (kept for backward compatibility)
+// ============================================================================
+
+// Legacy action for non-streaming use cases
+export const sendMessageToAgent = action({
+  args: {
+    threadId: v.string(),
+    prompt: v.string(),
+    useRAG: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    if (isLocalMode() || !cloudAgent) {
+      throw new Error(
+        "This action requires cloud mode. Please configure OpenAI."
+      );
+    }
+
+    const { thread } = await cloudAgent.continueThread(ctx, {
+      threadId: args.threadId,
+    });
+
+    const result = await thread.generateText({
+      prompt: args.prompt,
+    });
+
+    return result.text;
+  },
+});
+
 export const helloWorld = action({
   args: { city: v.string() },
   handler: async (ctx, { city }) => {
-    const threadId = await createThread(ctx, components.agent);
+    if (isLocalMode() || !cloudAgent) {
+      throw new Error("This action requires cloud mode.");
+    }
+
     const prompt = `What is the weather in ${city}?`;
-    const result = await agent.generateText(ctx, { threadId }, { prompt });
+    const threadId = await createThread(ctx, components.agent);
+    const result = await cloudAgent.generateText(ctx, { threadId }, { prompt });
     return result.text;
   },
 });

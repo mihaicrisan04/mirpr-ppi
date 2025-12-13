@@ -1,7 +1,7 @@
 "use client";
 
 import { api } from "@mirpr-ppi/backend/convex/_generated/api";
-import { useAction, useQuery, useMutation } from "convex/react";
+import { useAction, useQuery } from "convex/react";
 import { useState, useCallback, type ChangeEvent } from "react";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,22 +20,91 @@ import {
   PlusIcon,
   Trash2Icon,
   UploadIcon,
+  MessageSquareIcon,
 } from "lucide-react";
+import Link from "next/link";
+import SignInForm from "@/components/sign-in-form";
+import SignUpForm from "@/components/sign-up-form";
+import UserMenu from "@/components/user-menu";
 
 export default function DashboardPage() {
+  const user = useQuery(api.auth.getCurrentUser);
+  const [authMode, setAuthMode] = useState<"signin" | "signup">("signin");
+
+  // Loading state
+  if (user === undefined) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loader2Icon className="size-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  // Not logged in - show auth forms
+  if (user === null) {
+    return (
+      <div className="container mx-auto max-w-md p-6">
+        <div className="mb-8 text-center">
+          <h1 className="mb-2 font-bold text-2xl">Welcome to mirpr-ppi</h1>
+          <p className="text-muted-foreground">
+            Sign in to access the AI assistant and knowledge base
+          </p>
+        </div>
+
+        {authMode === "signin" ? (
+          <SignInForm onSwitchToSignUp={() => setAuthMode("signup")} />
+        ) : (
+          <SignUpForm onSwitchToSignIn={() => setAuthMode("signin")} />
+        )}
+      </div>
+    );
+  }
+
+  // Logged in - show dashboard
   return (
     <div className="container mx-auto max-w-4xl space-y-8 p-6">
-      <div className="space-y-2">
-        <h1 className="font-bold text-3xl tracking-tight">Knowledge Base</h1>
-        <p className="text-muted-foreground">
-          Manage the AI assistant's knowledge by adding text content or
-          uploading files.
-        </p>
+      <div className="flex items-center justify-between">
+        <div className="space-y-1">
+          <h1 className="font-bold text-3xl tracking-tight">Dashboard</h1>
+          <p className="text-muted-foreground">
+            Welcome back, {user.name ?? "User"}
+          </p>
+        </div>
+        <UserMenu />
       </div>
 
-      <div className="grid gap-6 md:grid-cols-2">
-        <AddTextContent />
-        <UploadFile />
+      {/* Quick actions */}
+      <Card>
+        <CardHeader>
+          <CardTitle>Quick Actions</CardTitle>
+          <CardDescription>Jump right into the action</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="flex gap-4">
+            <Button asChild>
+              <Link href="/chat">
+                <MessageSquareIcon className="mr-2 size-4" />
+                Start New Chat
+              </Link>
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* Knowledge Base Section */}
+      <div className="space-y-4">
+        <div className="space-y-1">
+          <h2 className="font-semibold text-xl">Knowledge Base</h2>
+          <p className="text-muted-foreground text-sm">
+            Manage the AI assistant's knowledge by adding text content or
+            uploading files.
+          </p>
+        </div>
+
+        <div className="grid gap-6 md:grid-cols-2">
+          <AddTextContent />
+          <UploadFile />
+        </div>
       </div>
 
       <DocumentsList />
@@ -255,9 +324,7 @@ function DocumentsList() {
           <FileTextIcon className="size-5" />
           Documents ({documents.length})
         </CardTitle>
-        <CardDescription>
-          All documents in the knowledge base
-        </CardDescription>
+        <CardDescription>All documents in the knowledge base</CardDescription>
       </CardHeader>
       <CardContent>
         {documents.length === 0 ? (
@@ -282,13 +349,9 @@ function DocumentsList() {
                     {doc.contentPreview}
                   </p>
                   <div className="mt-1 flex items-center gap-2 text-muted-foreground text-xs">
-                    <span>
-                      {doc.contentLength.toLocaleString()} characters
-                    </span>
+                    <span>{doc.contentLength.toLocaleString()} characters</span>
                     <span>•</span>
-                    <span>
-                      {new Date(doc.createdAt).toLocaleDateString()}
-                    </span>
+                    <span>{new Date(doc.createdAt).toLocaleDateString()}</span>
                   </div>
                 </div>
                 <Button

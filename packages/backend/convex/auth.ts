@@ -35,8 +35,8 @@ export { createAuth };
 export const getCurrentUser = query({
   args: {},
   returns: v.any(),
-  async handler(ctx, args) {
-    // TODO: if this crashes later check if there is a missmatch between mutations ctx and queries. later on there might come the need for a mutation context for this to work
-    return authComponent.getAuthUser(ctx as any);
+  async handler(ctx) {
+    // Use safeGetAuthUser to return null when not authenticated instead of throwing
+    return authComponent.safeGetAuthUser(ctx as any);
   },
 });
